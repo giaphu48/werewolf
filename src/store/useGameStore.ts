@@ -98,9 +98,14 @@ export const useGameStore = create<GameStoreState>((set) => ({
   setWitchVictimId: (witchVictimId) => set({ witchVictimId }),
 
   addChatMessage: (msg) =>
-    set((state) => ({
-      chatMessages: [...state.chatMessages.slice(-99), msg],
-    })),
+    set((state) => {
+      if (state.chatMessages.some((existing) => existing.id === msg.id)) {
+        return state;
+      }
+      return {
+        chatMessages: [...state.chatMessages.slice(-99), msg],
+      };
+    }),
 
   clearChatMessages: () => set({ chatMessages: [] }),
   setActiveChatChannel: (activeChatChannel) => set({ activeChatChannel }),

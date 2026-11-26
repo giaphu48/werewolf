@@ -17,17 +17,90 @@ type TypedClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 const SERVER_URL =
   process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4000';
 
-let socketInstance: TypedClientSocket | null = null;
-let boundListenersCount = 0;
+const globalForSocket = globalThis as unknown as {
+  __werewolfSocket?: TypedClientSocket;
+};
+
+function attachSingletonListeners(socket: TypedClientSocket): void {
+  socket.off('connect');
+  socket.off('disconnect');
+  socket.off('room:kicked');
+  socket.off('room:state_sync');
+  socket.off('game:phase_changed');
+  socket.off('game:seer_result');
+  socket.off('game:witch_info');
+  socket.off('chat:receive');
+  socket.off('error:message');
+
+  socket.on('connect', () => {
+    useGameStore.getState().setConnected(true);
+
+    // Tự động Reconnect lại vào phòng nếu kết nối mạng bị rớt tạm thời
+    const userState = useUserStore.getState();
+    const activeRoomId =
+      useGameStore.getState().roomState?.roomId || userState.lastRoomId;
+
+    if (activeRoomId && userState.playerId && userState.playerName.trim()) {
+      socket.emit('room:join', {
+        roomId: activeRoomId,
+        playerName: userState.playerName.trim(),
+        avatar: userState.avatar,
+        playerId: userState.playerId,
+      });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    useGameStore.getState().setConnected(false);
+  });
+
+  socket.on('room:kicked', (payload) => {
+    useUserStore.getState().setLastRoomId('');
+    useGameStore.getState().resetGameStore();
+    useGameStore.getState().setKickedReason(payload.reason);
+  });
+
+  socket.on('room:state_sync', (payload) => {
+    useGameStore.getState().setRoomState(payload.roomState);
+  });
+
+  socket.on('game:phase_changed', (payload) => {
+    const store = useGameStore.getState();
+    store.setPhaseMessage(payload.message);
+    store.setSelectedTargetId(null);
+    store.setErrorMessage(null);
+    if (payload.phase === 'NIGHT') {
+      store.setSeerResult(null);
+      store.setWitchVictimId(null);
+    }
+  });
+
+  socket.on('game:seer_result', (payload) => {
+    useGameStore.getState().setSeerResult(payload);
+  });
+
+  socket.on('game:witch_info', (payload) => {
+    useGameStore.getState().setWitchVictimId(payload.victimId);
+  });
+
+  socket.on('chat:receive', (payload) => {
+    useGameStore.getState().addChatMessage(payload);
+  });
+
+  socket.on('error:message', (payload) => {
+    useGameStore.getState().setErrorMessage(payload.message);
+  });
+}
 
 export function getSocket(): TypedClientSocket {
-  if (!socketInstance) {
-    socketInstance = io(SERVER_URL, {
+  if (!globalForSocket.__werewolfSocket) {
+    globalForSocket.__werewolfSocket = io(SERVER_URL, {
       autoConnect: true,
       transports: ['websocket', 'polling'],
     });
   }
-  return socketInstance;
+  attachSingletonListeners(globalForSocket.__werewolfSocket);
+  return globalForSocket.__werewolfSocket;
 }
 
 /**
@@ -36,12 +109,6 @@ export function getSocket(): TypedClientSocket {
  */
 export function useSocket(onRoomJoined?: (roomId: string) => void) {
   const setConnected = useGameStore((s) => s.setConnected);
-  const setRoomState = useGameStore((s) => s.setRoomState);
-  const setSelectedTargetId = useGameStore((s) => s.setSelectedTargetId);
-  const setPhaseMessage = useGameStore((s) => s.setPhaseMessage);
-  const setSeerResult = useGameStore((s) => s.setSeerResult);
-  const setWitchVictimId = useGameStore((s) => s.setWitchVictimId);
-  const addChatMessage = useGameStore((s) => s.addChatMessage);
   const setErrorMessage = useGameStore((s) => s.setErrorMessage);
   const setKickedReason = useGameStore((s) => s.setKickedReason);
   const resetGameStore = useGameStore((s) => s.resetGameStore);
@@ -68,88 +135,16 @@ export function useSocket(onRoomJoined?: (roomId: string) => void) {
 
     socket.on('room:joined', handleRoomJoined);
 
-    // Đảm bảo các listener đồng bộ Zustand Store chỉ gắn 1 lần trên singleton socket
-    if (boundListenersCount === 0) {
-      socket.on('connect', () => {
-        useGameStore.getState().setConnected(true);
-
-        // Tự động Reconnect lại vào phòng nếu kết nối mạng bị rớt tạm thời
-        const userState = useUserStore.getState();
-        const activeRoomId =
-          useGameStore.getState().roomState?.roomId || userState.lastRoomId;
-
-        if (activeRoomId && userState.playerId && userState.playerName.trim()) {
-          socket.emit('room:join', {
-            roomId: activeRoomId,
-            playerName: userState.playerName.trim(),
-            avatar: userState.avatar,
-            playerId: userState.playerId,
-          });
-        }
-      });
-
-      socket.on('disconnect', () => {
-        useGameStore.getState().setConnected(false);
-      });
-
-      socket.on('room:kicked', (payload) => {
-        useUserStore.getState().setLastRoomId('');
-        useGameStore.getState().resetGameStore();
-        useGameStore.getState().setKickedReason(payload.reason);
-      });
-
-      socket.on('room:state_sync', (payload) => {
-        useGameStore.getState().setRoomState(payload.roomState);
-      });
-
-      socket.on('game:phase_changed', (payload) => {
-        const store = useGameStore.getState();
-        store.setPhaseMessage(payload.message);
-        store.setSelectedTargetId(null);
-        store.setErrorMessage(null);
-        if (payload.phase === 'NIGHT') {
-          store.setSeerResult(null);
-          store.setWitchVictimId(null);
-        }
-      });
-
-      socket.on('game:seer_result', (payload) => {
-        useGameStore.getState().setSeerResult(payload);
-      });
-
-      socket.on('game:witch_info', (payload) => {
-        useGameStore.getState().setWitchVictimId(payload.victimId);
-      });
-
-      socket.on('chat:receive', (payload) => {
-        useGameStore.getState().addChatMessage(payload);
-      });
-
-      socket.on('error:message', (payload) => {
-        useGameStore.getState().setErrorMessage(payload.message);
-      });
-    }
-
-    boundListenersCount += 1;
-
     return () => {
       socket.off('room:joined', handleRoomJoined);
-      boundListenersCount = Math.max(0, boundListenersCount - 1);
     };
   }, [
-    addChatMessage,
     onRoomJoined,
-    resetGameStore,
     setConnected,
     setErrorMessage,
     setKickedReason,
     setLastRoomId,
-    setPhaseMessage,
     setPlayerId,
-    setRoomState,
-    setSeerResult,
-    setSelectedTargetId,
-    setWitchVictimId,
   ]);
 
   // ==========================================
